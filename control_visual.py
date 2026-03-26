@@ -46,9 +46,10 @@ LOOP_HZ           = 4.0         # fréquence de correction (Hz)
 ARUCO_DICT_ID = aruco.DICT_4X4_50
 
 # IDs marqueurs
-ID_BASE   = 0
-ID_ROBOT  = 1
-ID_TARGET = 2
+ID_BASE    = 0
+ID_ROBOT   = 1
+ID_TARGET  = 2   # première destination
+ID_TARGET2 = 3   # deuxième destination
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  COULEURS & TYPOGRAPHIE (palette industrielle / HUD militaire)
@@ -61,7 +62,8 @@ C_GRID      = (28,  36,  48 )
 C_WHITE     = (220, 225, 230)
 C_DIM       = (90,  100, 110)
 C_ROBOT     = (60,  220,  80)   # vert vif
-C_TARGET    = (60,   80, 220)   # rouge-bleu
+C_TARGET    = (60,   80, 220)   # bleu
+C_TARGET2   = (0,   180, 255)   # cyan-orange — deuxième destination
 C_BASE      = (180, 180, 180)   # gris
 C_HEADING   = (0,   200, 255)   # cyan — direction actuelle robot
 C_PATH      = (0,   200, 140)   # cyan-vert — vecteur sol
@@ -101,6 +103,7 @@ class State:
         # Navigation
         self.running    = False     # navigation active
         self.arrived    = False
+        self.active_target   = ID_TARGET  # marqueur cible actif (2 ou 3)
         self.current_cmd     = "WAITING"
         self.cmd_duration    = 0.0
         self.angle_error_deg = 0.0
@@ -191,21 +194,22 @@ def navigation_loop():
         with state.lock:
             if not state.running or state.arrived:
                 continue
-            markers = dict(state.markers)
+            markers    = dict(state.markers)
+            active_tgt = state.active_target
 
         # Les deux marqueurs nécessaires
-        if ID_ROBOT not in markers or ID_TARGET not in markers:
+        if ID_ROBOT not in markers or active_tgt not in markers:
             with state.lock:
                 state.current_cmd = "LOST"
                 state.log.append((time.time(), "LOST", "Marqueur(s) manquant(s)"))
             continue
 
         rp    = marker_center(markers[ID_ROBOT])
-        tp    = marker_center(markers[ID_TARGET])
+        tp    = marker_center(markers[active_tgt])
         r_ang = marker_angle_deg(markers[ID_ROBOT])
 
         # Échelle depuis marqueur sol
-        scale_ref = markers.get(ID_BASE) if ID_BASE in markers else markers.get(ID_TARGET)
+        scale_ref = markers.get(ID_BASE) if ID_BASE in markers else markers.get(active_tgt)
         scale     = estimate_scale(scale_ref) if scale_ref is not None else estimate_scale(markers[ID_ROBOT])
 
         direct_px   = math.hypot(tp[0]-rp[0], tp[1]-rp[1])
@@ -228,10 +232,12 @@ def navigation_loop():
         if ground_cm < DIST_THRESH_CM:
             send_cmd("STOP")
             with state.lock:
+                tgt_num = 2 if state.active_target == ID_TARGET else 3
                 state.current_cmd = "ARRIVED"
                 state.running     = False
                 state.arrived     = True
-                state.log.append((time.time(), "ARRIVED", f"Cible atteinte  ({ground_cm:.1f} cm)"))
+                state.log.append((time.time(), "ARRIVED",
+                                  f"Dest {tgt_num} atteinte ({ground_cm:.1f} cm)"))
             continue
 
         if abs(angle_error) > ANGLE_THRESH_DEG:
@@ -296,9 +302,10 @@ def draw_camera_view(frame: np.ndarray, markers: dict) -> np.ndarray:
         cv2.line(out, (0,y), (w,y), C_GRID, 1)
 
     role_meta = {
-        ID_BASE:   ("BASE",   C_BASE,   (200,200,200)),
-        ID_ROBOT:  ("ROBOT",  C_ROBOT,  (60,220,80)),
-        ID_TARGET: ("TARGET", C_TARGET, (60,80,220)),
+        ID_BASE:    ("BASE",   C_BASE,   (200,200,200)),
+        ID_ROBOT:   ("ROBOT",  C_ROBOT,  (60,220,80)),
+        ID_TARGET:  ("DEST 1", C_TARGET, (60,80,220)),
+        ID_TARGET2: ("DEST 2", C_TARGET2,(0,180,255)),
     }
 
     for mid, corners in markers.items():
@@ -328,14 +335,17 @@ def draw_camera_view(frame: np.ndarray, markers: dict) -> np.ndarray:
         cv2.rectangle(out, (lx-3, ly-th-3), (lx+tw+3, ly+4), (10,12,16), -1)
         cv2.putText(out, label, (lx, ly), FONT_M, 0.5, col, 1, cv2.LINE_AA)
 
-    # ── Ligne sol robot→cible ──────────────────────────────────────────────
-    if ID_ROBOT in markers and ID_TARGET in markers:
+    # ── Ligne sol robot→cible active ──────────────────────────────────────────
+    with state.lock:
+        active_tgt = state.active_target
+    if ID_ROBOT in markers and active_tgt in markers:
         rp = marker_center(markers[ID_ROBOT])
-        tp = marker_center(markers[ID_TARGET])
+        tp = marker_center(markers[active_tgt])
+        tgt_col = C_TARGET if active_tgt == ID_TARGET else C_TARGET2
         mid_pt = ((rp[0]+tp[0])//2, (rp[1]+tp[1])//2)
 
         direct_px  = math.hypot(tp[0]-rp[0], tp[1]-rp[1])
-        scale_ref  = markers.get(ID_BASE) if ID_BASE in markers else (markers.get(ID_TARGET) if ID_TARGET in markers else markers[ID_ROBOT])
+        scale_ref  = markers.get(ID_BASE) if ID_BASE in markers else (markers.get(active_tgt) if active_tgt in markers else markers[ID_ROBOT])
         scale      = estimate_scale(scale_ref)
         direct_cm, ground_cm = ground_distance_cm(direct_px, scale)
 
@@ -343,9 +353,9 @@ def draw_camera_view(frame: np.ndarray, markers: dict) -> np.ndarray:
         _dashed_line(out, rp, tp, C_HYPO, thickness=1)
 
         # Ligne sol (pleine, colorée)
-        cv2.line(out, rp, tp, C_PATH, 2)
-        _end_tick(out, rp, tp, C_PATH)
-        _end_tick(out, tp, rp, C_PATH)
+        cv2.line(out, rp, tp, tgt_col, 2)
+        _end_tick(out, rp, tp, tgt_col)
+        _end_tick(out, tp, rp, tgt_col)
 
         # Label distance sol
         perp = _perp_offset(rp, tp, -18)
@@ -354,7 +364,7 @@ def draw_camera_view(frame: np.ndarray, markers: dict) -> np.ndarray:
         label = f"{ground_cm:.1f} cm"
         (tw, th), _ = cv2.getTextSize(label, FONT_M, 0.58, 2)
         cv2.rectangle(out, (lx-5, ly-th-5), (lx+tw+5, ly+5), (8,10,14), -1)
-        cv2.putText(out, label, (lx, ly), FONT_M, 0.58, C_PATH, 2, cv2.LINE_AA)
+        cv2.putText(out, label, (lx, ly), FONT_M, 0.58, tgt_col, 2, cv2.LINE_AA)
 
         # Label distance directe
         perp2 = _perp_offset(rp, tp, +14)
@@ -433,6 +443,7 @@ def draw_decision_panel(height: int) -> np.ndarray:
         fps       = state.fps
         running   = state.running
         arrived   = state.arrived
+        active_tgt = state.active_target
 
     conn_col = C_OK if connected else C_WARN
     conn_txt = f"Robot  {ROBOT_IP}" if connected else "Robot  NON CONNECTE"
@@ -441,6 +452,20 @@ def draw_decision_panel(height: int) -> np.ndarray:
     y += 18
     txt(f"FPS : {fps:.1f}", y, C_DIM, 0.42)
     y += 22
+    sep(y); y += 10
+
+    # ── DESTINATION ACTIVE ────────────────────────────────────────────────
+    y = section("DESTINATION", y); y += 6
+    if active_tgt == ID_TARGET:
+        dest_label = "DEST 1  (ArUco #2)"
+        dest_col   = C_TARGET
+    else:
+        dest_label = "DEST 2  (ArUco #3)"
+        dest_col   = C_TARGET2
+    cv2.rectangle(panel, (x0-4, y), (PANEL_W-8, y+22), (22,28,38), -1)
+    cv2.rectangle(panel, (x0-4, y), (PANEL_W-8, y+22), dest_col, 1)
+    cv2.putText(panel, dest_label, (x0+6, y+15), FONT_M, 0.52, dest_col, 1, cv2.LINE_AA)
+    y += 30
     sep(y); y += 10
 
     # ── COMMANDE COURANTE ─────────────────────────────────────────────────
@@ -549,11 +574,13 @@ def draw_decision_panel(height: int) -> np.ndarray:
         y += 16
 
     # ── CONTRÔLES ─────────────────────────────────────────────────────────
-    ctrl_y = height - 60
+    ctrl_y = height - 74
     sep(ctrl_y); ctrl_y += 10
     run_col = C_OK if running else C_DIM
     cv2.putText(panel, "[ESPACE] Start/Pause", (x0, ctrl_y),
                 FONT, 0.41, run_col, 1, cv2.LINE_AA); ctrl_y += 16
+    cv2.putText(panel, "[N] → Destination 2", (x0, ctrl_y),
+                FONT, 0.41, C_TARGET2, 1, cv2.LINE_AA); ctrl_y += 16
     cv2.putText(panel, "[R] Reset   [Q] Quitter", (x0, ctrl_y),
                 FONT, 0.41, C_DIM, 1, cv2.LINE_AA)
 
@@ -624,7 +651,7 @@ def main():
     fps_t  = time.time()
     fps_n  = 0
 
-    print("\n  [ESPACE] Démarrer   [R] Reset   [Q] Quitter\n")
+    print("\n  [ESPACE] Démarrer   [N] Dest 2   [R] Reset   [Q] Quitter\n")
 
     while True:
         ret, raw = cap.read()
@@ -665,9 +692,9 @@ def main():
         cv2.rectangle(cam_view, (0,0), (frame_w, 32), (8,10,14), -1)
         cv2.putText(cam_view, status_txt, (10, 22), FONT_M, 0.6,
                     status_col, 2, cv2.LINE_AA)
-        m_txt = f"Marqueurs : {len(markers)}/3"
+        m_txt = f"Marqueurs : {len(markers)}/4"
         cv2.putText(cam_view, m_txt, (frame_w-160, 22), FONT, 0.5,
-                    C_OK if len(markers)==3 else C_WARN, 1, cv2.LINE_AA)
+                    C_OK if len(markers)==4 else C_WARN, 1, cv2.LINE_AA)
 
         # Assemblage final
         canvas = np.zeros((frame_h, frame_w + PANEL_W, 3), dtype=np.uint8)
@@ -692,11 +719,22 @@ def main():
         elif key == ord('r') or key == ord('R'):
             send_cmd("STOP")
             with state.lock:
-                state.running   = False
-                state.arrived   = False
-                state.current_cmd = "WAITING"
-                state.log.append((time.time(), "INFO", "Reset"))
+                state.running      = False
+                state.arrived      = False
+                state.active_target = ID_TARGET
+                state.current_cmd  = "WAITING"
+                state.log.append((time.time(), "INFO", "Reset → Dest 1"))
             print("  Reset.")
+
+        # N : basculer vers destination 2 (ArUco #3)
+        elif key == ord('n') or key == ord('N'):
+            with state.lock:
+                if state.active_target != ID_TARGET2:
+                    state.active_target = ID_TARGET2
+                    state.arrived       = False
+                    state.running       = True
+                    state.log.append((time.time(), "INFO", "→ Dest 2 (ArUco #3)"))
+                    print("  Navigation vers destination 2 (ArUco #3)")
 
         # Q / ESC : quitter
         elif key == ord('q') or key == ord('Q') or key == 27:
