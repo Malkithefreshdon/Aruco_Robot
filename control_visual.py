@@ -37,9 +37,9 @@ ROBOT_HEIGHT_MM = 125.0       # hauteur du marker ID1 (12.5 cm)
 
 # Paramètres navigation
 ANGLE_THRESH_DEG  = 12.0   # seuil alignement (°) — en dessous : on avance
-DIST_THRESH_CM    = 0.5    # seuil arrivée (cm sol)
+DIST_THRESH_CM    = 20   # seuil arrivée (cm sol)
 TURN_SEC_PER_DEG  = 0.25 / 90   # secondes de pivot par degré d'erreur (à calibrer)
-FWD_SEC_PER_CM    = 0.08        # secondes d'avance par cm (à calibrer)
+FWD_SEC_PER_CM    = 0.25        # secondes d'avance par cm (à calibrer)
 LOOP_HZ           = 4.0         # fréquence de correction (Hz)
 
 # ArUco
