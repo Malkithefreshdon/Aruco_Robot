@@ -28,7 +28,7 @@ import collections
 #  CONFIGURATION — à adapter
 # ═════════════════════════════════════════════════════════════════════════════
 
-ROBOT_IP   = "192.168.137.254"   # ← IP du Raspberry Pi
+ROBOT_IP   = "192.168.137.226"   # ← IP du Raspberry Pi
 ROBOT_PORT = 9999
 
 CALIB_FILE      = "camera_calibration.npz"
@@ -46,10 +46,16 @@ LOOP_HZ           = 4.0         # fréquence de correction (Hz)
 ARUCO_DICT_ID = aruco.DICT_4X4_50
 
 # IDs marqueurs
-ID_BASE    = 0
-ID_ROBOT   = 1
-ID_TARGET  = 2   # première destination
-ID_TARGET2 = 3   # deuxième destination
+ID_BASE      = 0
+ID_ROBOT     = 1
+ID_TARGET    = 2   # première destination
+ID_TARGET2   = 3   # deuxième destination
+ID_OBSTACLE  = 6   # ← NOUVEAU : marqueur d'obstacle
+
+# Paramètres d'évitement (ajoutés)
+OBSTACLE_DIST_THRESH_CM   = 45.0   # distance sol en dessous de laquelle on évite
+OBSTACLE_ANGLE_THRESH_DEG = 40.0   # cône devant le robot
+AVOID_DURATION_SEC        = 0.80   # durée du pivot d'évitement
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  COULEURS & TYPOGRAPHIE (palette industrielle / HUD militaire)
@@ -72,6 +78,7 @@ C_WARN      = (0,   165, 255)   # orange
 C_OK        = (60,  220,  80)   # vert
 C_ERROR     = (60,   60, 220)   # rouge
 C_ACCENT    = (0,   210, 170)   # teal
+C_OBSTACLE  = (20,   60, 255)   # orange vif pour obstacle
 
 # Commandes → couleur
 CMD_COLORS = {
@@ -113,6 +120,10 @@ class State:
         self.target_bearing  = 0.0
         self.scale_px_mm     = 1.0
         self.fps             = 0.0
+        # NOUVEAU : état obstacle
+        self.obstacle_present     = False
+        self.obstacle_dist_cm     = 0.0
+        self.obstacle_bearing_error = 0.0
         # Log
         self.log = collections.deque(maxlen=LOG_SIZE)
         # Connexion robot
@@ -228,6 +239,42 @@ def navigation_loop():
             state.target_bearing  = bearing
             state.angle_error_deg = angle_error
 
+        # ── NOUVELLE LOGIQUE : DÉTECTION ET ÉVITEMENT OBSTACLE ID 6 ────────
+        obs_present = ID_OBSTACLE in markers
+        obs_dist_cm = 0.0
+        obs_error   = 0.0
+        if obs_present:
+            op = marker_center(markers[ID_OBSTACLE])
+            dxo = op[0] - rp[0]
+            dyo = op[1] - rp[1]
+            obs_bearing = math.degrees(math.atan2(dyo, dxo))
+            obs_error   = normalize_angle(obs_bearing - r_ang)
+            obs_direct_px = math.hypot(dxo, dyo)
+            _, obs_dist_cm = ground_distance_cm(obs_direct_px, scale)
+
+        with state.lock:
+            state.obstacle_present      = obs_present
+            state.obstacle_dist_cm      = obs_dist_cm
+            state.obstacle_bearing_error = obs_error
+
+        # Évitement prioritaire
+        if (obs_present and
+            obs_dist_cm < OBSTACLE_DIST_THRESH_CM and
+            abs(obs_error) < OBSTACLE_ANGLE_THRESH_DEG):
+
+            direction = "LEFT" if obs_error > 0 else "RIGHT"
+            duration  = AVOID_DURATION_SEC
+
+            with state.lock:
+                state.current_cmd  = direction
+                state.cmd_duration = duration
+                state.log.append((time.time(), "AVOID",
+                                  f"ID6 @ {obs_dist_cm:.1f}cm err={obs_error:+.1f}° → {direction} {duration}s"))
+
+            send_cmd(direction, duration)
+            time.sleep(duration + 0.05)
+            continue   # on saute la logique normale cette itération
+
         # ── Décision ──────────────────────────────────────────────────────
         if ground_cm < DIST_THRESH_CM:
             send_cmd("STOP")
@@ -306,6 +353,7 @@ def draw_camera_view(frame: np.ndarray, markers: dict) -> np.ndarray:
         ID_ROBOT:   ("ROBOT",  C_ROBOT,  (60,220,80)),
         ID_TARGET:  ("DEST 1", C_TARGET, (60,80,220)),
         ID_TARGET2: ("DEST 2", C_TARGET2,(0,180,255)),
+        ID_OBSTACLE: ("OBSTACLE", C_OBSTACLE, (255,140,60)),   # ← NOUVEAU
     }
 
     for mid, corners in markers.items():
@@ -466,6 +514,27 @@ def draw_decision_panel(height: int) -> np.ndarray:
     cv2.rectangle(panel, (x0-4, y), (PANEL_W-8, y+22), dest_col, 1)
     cv2.putText(panel, dest_label, (x0+6, y+15), FONT_M, 0.52, dest_col, 1, cv2.LINE_AA)
     y += 30
+    sep(y); y += 10
+
+    # ── NOUVELLE SECTION OBSTACLE ─────────────────────────────────────────────
+    y = section("OBSTACLE ID6", y); y += 6
+
+    with state.lock:
+        obs_present = state.obstacle_present
+        obs_dcm     = state.obstacle_dist_cm
+        obs_err     = state.obstacle_bearing_error
+
+    if obs_present and obs_dcm > 0.1:
+        obs_col = C_ERROR if obs_dcm < OBSTACLE_DIST_THRESH_CM else C_WARN
+        cv2.rectangle(panel, (x0-4, y), (PANEL_W-8, y+38), (22,28,38), -1)
+        cv2.rectangle(panel, (x0-4, y), (PANEL_W-8, y+38), obs_col, 1)
+        txt(f"Dist : {obs_dcm:.1f} cm", y + 14, obs_col, 0.48, bold=True)
+        txt(f"Angle: {obs_err:+.1f}°", y + 30, obs_col, 0.42)
+        y += 44
+    else:
+        txt("— Aucun obstacle détecté —", y + 14, C_DIM, 0.42)
+        y += 26
+
     sep(y); y += 10
 
     # ── COMMANDE COURANTE ─────────────────────────────────────────────────

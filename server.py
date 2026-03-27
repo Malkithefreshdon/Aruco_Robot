@@ -25,8 +25,8 @@ SERVO_STEERING_CH = 0
 #  TUNING PARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-DRIVE_SPEED      = 60    # Vitesse avant (0–100 %)
-REVERSE_SPEED    = 50    # Vitesse arrière pour pivot sur place
+DRIVE_SPEED      = 40    # Vitesse avant (0–100 %)
+REVERSE_SPEED    = 60    # Vitesse arrière pour pivot sur place
 
 SERVO_CENTER     = 90    # Tout droit (°)
 SERVO_LEFT       = 60    # Virage gauche max (°)
